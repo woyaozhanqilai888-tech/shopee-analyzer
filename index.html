@@ -22,7 +22,6 @@
 </head>
 <body>
     <div id="root"></div>
-    
     <script type="text/babel">
         const { useState, useEffect } = React;
         
@@ -42,7 +41,6 @@
             if (savedKeys) {
                 const keys = JSON.parse(savedKeys);
                 setApiKeys(keys);
-                // 页面加载时自动检测一次已有 Key
                 Object.keys(keys).forEach(platform => {
                     if (keys[platform]) validateKey(platform, keys[platform], savedProxy || '');
                 });
@@ -61,28 +59,20 @@
                 const urlBase = currentProxy || '';
                 let endpoint = '';
                 let headers = { 'Content-Type': 'application/json' };
-                let body = {};
 
                 if (platform === 'openai') {
-                    endpoint = 'https://api.openai.com/v1/models'; // 轻量级查询
+                    endpoint = 'https://api.openai.com/v1/models';
                     headers['Authorization'] = `Bearer ${key}`;
                 } else if (platform === 'deepseek') {
                     endpoint = 'https://api.deepseek.com/models';
                     headers['Authorization'] = `Bearer ${key}`;
                 } else if (platform === 'gemini') {
-                    endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro?key=${key}`;
+                    // 修正 Gemini 验证路径
+                    endpoint = `https://generativelanguage.googleapis.com/v1beta/models?key=${key}`;
                 }
 
-                const response = await fetch(urlBase + endpoint, { 
-                    method: platform === 'gemini' ? 'GET' : 'GET', 
-                    headers 
-                });
-
-                if (response.ok) {
-                    setApiStatus(prev => ({ ...prev, [platform]: 'success' }));
-                } else {
-                    setApiStatus(prev => ({ ...prev, [platform]: 'error' }));
-                }
+                const response = await fetch(urlBase + endpoint, { method: 'GET', headers });
+                setApiStatus(prev => ({ ...prev, [platform]: response.ok ? 'success' : 'error' }));
             } catch (e) {
                 setApiStatus(prev => ({ ...prev, [platform]: 'error' }));
             }
@@ -91,7 +81,6 @@
           const saveSettings = () => {
             localStorage.setItem('shopee_api_keys', JSON.stringify(apiKeys));
             localStorage.setItem('shopee_proxy', proxy);
-            // 保存后立即触发全量检测
             Object.keys(apiKeys).forEach(platform => validateKey(platform, apiKeys[platform], proxy));
             setShowSettings(false);
           };
@@ -130,7 +119,7 @@
           };
 
           const callAI = async (platform, apiKey, analysisData) => {
-            const prompt = `分析Shopee GMV Max数据：ROAS ${analysisData.metrics.roas}, 点击率 ${analysisData.metrics.ctr}%, 转化率 ${analysisData.metrics.cvr}%。提供3条优化建议，返回JSON: {"suggestions": [{"title": "标题", "content": "建议", "priority": "high"}]}`;
+            const prompt = `分析Shopee数据：ROAS ${analysisData.metrics.roas}, 点击率 ${analysisData.metrics.ctr}%, 转化率 ${analysisData.metrics.cvr}%。提供3条优化建议，返回纯JSON: {"suggestions": [{"title": "标题", "content": "建议", "priority": "high"}]}`;
             const urlBase = proxy || '';
             let endpoint = '';
             let headers = { 'Content-Type': 'application/json' };
@@ -145,14 +134,23 @@
                 headers['Authorization'] = `Bearer ${apiKey}`;
                 body = { model: 'deepseek-chat', messages: [{ role: 'user', content: prompt }] };
             } else if (platform === 'gemini') {
-                endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`;
+                // 使用兼容性更强的 1.5-flash 模型
+                endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
                 body = { contents: [{ parts: [{ text: prompt }] }] };
             }
 
             const response = await fetch(urlBase + endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
             const resData = await response.json();
-            const text = platform === 'gemini' ? resData.candidates[0].content.parts[0].text : resData.choices[0].message.content;
-            return JSON.parse(text.match(/\{[\s\S]*\}/)[0]);
+            
+            let text = "";
+            if (platform === 'gemini') {
+                text = resData.candidates[0].content.parts[0].text;
+            } else {
+                text = resData.choices[0].message.content;
+            }
+            
+            const jsonMatch = text.match(/\{[\s\S]*\}/);
+            return JSON.parse(jsonMatch[0]);
           };
 
           const handleRunAnalysis = async () => {
@@ -193,34 +191,27 @@
                     ))}
                   </div>
                 </div>
-                <button onClick={() => setShowSettings(true)} className="p-2 hover:bg-gray-100 rounded-full relative">
+                <button onClick={() => setShowSettings(true)} className="p-2 hover:bg-gray-100 rounded-full transition-colors relative">
                   <span className="text-2xl">⚙️</span>
-                  {Object.values(apiStatus).some(s => s === 'error') && <span className="absolute top-0 right-0 w-3 h-3 bg-red-500 border-2 border-white rounded-full"></span>}
                 </button>
               </div>
 
               {showSettings && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-                  <div className="bg-white rounded-2xl p-8 w-full max-w-md shadow-2xl animate-in zoom-in duration-200">
-                    <h2 className="text-xl font-bold mb-6 flex justify-between">
-                        配置中心
-                        <button onClick={() => setShowSettings(false)} className="text-gray-400 hover:text-gray-600">✕</button>
-                    </h2>
+                  <div className="bg-white rounded-2xl p-8 w-full max-w-md shadow-2xl">
+                    <h2 className="text-xl font-bold mb-6 flex justify-between">配置中心 <button onClick={() => setShowSettings(false)}>✕</button></h2>
                     <div className="space-y-5">
                       <div>
-                        <label className="block text-xs font-bold text-gray-400 uppercase mb-1">代理地址 (CORS Proxy)</label>
-                        <input type="text" placeholder="https://cors-anywhere.herokuapp.com/" value={proxy} onChange={e => setProxy(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-orange-500 outline-none transition-all" />
+                        <label className="block text-xs font-bold text-gray-400 uppercase mb-1">代理地址 (GitHub部署必填)</label>
+                        <input type="text" placeholder="https://cors-anywhere.herokuapp.com/" value={proxy} onChange={e => setProxy(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-orange-500 outline-none" />
                       </div>
                       {Object.keys(apiKeys).map(k => (
                         <div key={k}>
                           <div className="flex justify-between items-center mb-1">
                             <label className="block text-xs font-bold text-gray-400 uppercase">{k} API KEY</label>
-                            <div className="flex items-center text-[10px] font-medium text-gray-500">
-                                <StatusDot status={apiStatus[k]} />
-                                {apiStatus[k] === 'success' ? '可用' : apiStatus[k] === 'error' ? '无效' : apiStatus[k] === 'loading' ? '检测中' : '未配置'}
-                            </div>
+                            <span className="text-[10px] text-gray-500 flex items-center"><StatusDot status={apiStatus[k]} /> {apiStatus[k]}</span>
                           </div>
-                          <input type="password" value={apiKeys[k]} onChange={e => setApiKeys({...apiKeys, [k]: e.target.value})} className={`w-full border rounded-lg px-3 py-2 text-sm outline-none transition-all focus:ring-2 ${apiStatus[k] === 'error' ? 'border-red-300 ring-red-100' : 'focus:ring-orange-500'}`} />
+                          <input type="password" value={apiKeys[k]} onChange={e => setApiKeys({...apiKeys, [k]: e.target.value})} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500" />
                         </div>
                       ))}
                     </div>
@@ -230,7 +221,7 @@
               )}
 
               {!data ? (
-                <div className="border-2 border-dashed border-gray-200 rounded-3xl p-20 text-center glass-card hover:border-orange-300 transition-colors">
+                <div className="border-2 border-dashed border-gray-200 rounded-3xl p-20 text-center glass-card">
                   <input type="file" accept=".csv" onChange={(e) => {
                     const file = e.target.files[0];
                     if (!file) return;
@@ -242,13 +233,13 @@
                     };
                     reader.readAsText(file);
                   }} id="csv-upload" className="hidden" />
-                  <label htmlFor="csv-upload" className="cursor-pointer group">
-                    <div className="text-6xl mb-4 group-hover:scale-110 transition-transform">📊</div>
-                    <p className="text-lg font-medium text-gray-700">点击上传 Shopee 广告报表 (CSV)</p>
+                  <label htmlFor="csv-upload" className="cursor-pointer">
+                    <div className="text-6xl mb-4">📊</div>
+                    <p className="text-lg font-medium text-gray-700">上传报表开始分析</p>
                   </label>
                 </div>
               ) : (
-                <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4">
+                <div className="space-y-8">
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                     {[
                       { label: '总GMV', val: `¥${analysis.metrics.totalGMV.toLocaleString()}`, color: 'text-orange-600' },
@@ -257,48 +248,43 @@
                       { label: '转化率', val: analysis.metrics.cvr + '%', color: 'text-purple-600' }
                     ].map((s, i) => (
                       <div key={i} className="glass-card p-6 rounded-2xl shadow-sm">
-                        <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">{s.label}</p>
+                        <p className="text-xs font-bold text-gray-400 tracking-wider">{s.label}</p>
                         <p className={`text-2xl font-black mt-1 ${s.color}`}>{s.val}</p>
                       </div>
                     ))}
                   </div>
 
                   <div className="flex justify-center">
-                    <button onClick={handleRunAnalysis} disabled={aiLoading} className="bg-orange-600 text-white px-10 py-4 rounded-full font-bold shadow-xl hover:bg-orange-700 active:scale-95 transition-all disabled:opacity-50">
-                      {aiLoading ? '正在调遣 AI 军团...' : '🚀 启动多 AI 深度诊断'}
+                    <button onClick={handleRunAnalysis} disabled={aiLoading} className="bg-orange-600 text-white px-10 py-4 rounded-full font-bold shadow-xl disabled:opacity-50">
+                      {aiLoading ? '分析中...' : '🚀 启动多 AI 诊断'}
                     </button>
                   </div>
 
-                  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  <div className="grid md:grid-cols-3 gap-6">
                     {Object.entries(multiAiResults).map(([platform, res]) => (
-                      <div key={platform} className="glass-card rounded-2xl overflow-hidden shadow-sm flex flex-col border-t-4 border-t-transparent hover:border-t-orange-500 transition-all">
-                        <div className={`${platformMeta[platform].color} px-4 py-2 text-white text-[10px] font-bold flex justify-between items-center`}>
-                          <span>{platformMeta[platform].name} ANALYSIS</span>
-                          <span className="bg-white/20 px-2 py-0.5 rounded text-white italic">{res.status === 'success' ? 'COMPLETE' : 'FAILED'}</span>
+                      <div key={platform} className="glass-card rounded-2xl overflow-hidden shadow-sm flex flex-col">
+                        <div className={`${platformMeta[platform].color} px-4 py-2 text-white text-[10px] font-bold`}>
+                          {platformMeta[platform].name}
                         </div>
                         <div className="p-5 flex-1 bg-white/50">
                           {res.status === 'success' ? (
                             <div className="space-y-4">
                               {res.data.suggestions.map((s, idx) => (
                                 <div key={idx}>
-                                  <h4 className="font-bold text-gray-800 text-sm flex items-center">
-                                    <span className="w-1.5 h-1.5 bg-orange-400 rounded-full mr-2"></span>
-                                    {s.title}
-                                  </h4>
-                                  <p className="text-xs text-gray-500 mt-1 leading-relaxed pl-3.5">{s.content}</p>
+                                  <h4 className="font-bold text-gray-800 text-sm">{s.title}</h4>
+                                  <p className="text-xs text-gray-500 mt-1">{s.content}</p>
                                 </div>
                               ))}
                             </div>
                           ) : (
-                            <div className="text-red-500 text-xs bg-red-50 p-3 rounded-lg border border-red-100 italic">Error: {res.error}</div>
+                            <div className="text-red-500 text-xs italic">Error: {res.error}</div>
                           )}
                         </div>
                       </div>
                     ))}
                   </div>
-                  
                   <div className="text-center pb-10">
-                    <button onClick={() => { setData(null); setMultiAiResults({}); }} className="text-gray-400 text-sm underline hover:text-orange-600 transition-colors">重置数据</button>
+                    <button onClick={() => { setData(null); setMultiAiResults({}); }} className="text-gray-400 text-sm underline">重置数据</button>
                   </div>
                 </div>
               )}
