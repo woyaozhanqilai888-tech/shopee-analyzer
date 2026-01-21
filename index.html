@@ -24,8 +24,6 @@
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect } = React;
-        
-        // 默认代理地址
         const DEFAULT_PROXY = 'https://cors-anywhere.herokuapp.com/';
 
         const ShopeeAdAnalyzer = () => {
@@ -53,13 +51,10 @@
             const currentProxy = savedProxy || DEFAULT_PROXY;
             setProxy(currentProxy);
             checkAndActivateProxy(currentProxy);
-
             if (savedKeys) {
                 const keys = JSON.parse(savedKeys);
                 setApiKeys(keys);
-                Object.keys(keys).forEach(platform => {
-                    if (keys[platform]) validateKey(platform, keys[platform], currentProxy);
-                });
+                Object.keys(keys).forEach(p => { if (keys[p]) validateKey(p, keys[p], currentProxy); });
             }
           }, []);
 
@@ -77,37 +72,50 @@
             } catch (e) { setApiStatus(prev => ({ ...prev, [platform]: 'error' })); }
           };
 
-          const parseCSV = (text) => {
-            const lines = text.split(/\r?\n/).filter(line => line.trim());
+          // 核心解析逻辑：自动跳过 Shopee 的头部信息行
+          const parseShopeeCSV = (text) => {
+            const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l);
+            // 寻找真正的表头行 (包含 Impression 或 曝光 的那一行)
+            const headerIndex = lines.findIndex(l => l.includes('Impression') || l.includes('曝光') || l.includes('Expense'));
+            
+            if (headerIndex === -1) {
+                alert("未在 CSV 中找到有效数据列，请确保上传的是 Shopee 广告原始报表。");
+                return null;
+            }
+
             const regex = /,(?=(?:(?:[^"]*"){2})*[^"]*$)/;
-            const headers = lines[0].split(regex).map(h => h.replace(/"/g, '').trim());
-            return lines.slice(1).map(line => {
-              const values = line.split(regex);
-              const row = {};
-              headers.forEach((header, index) => { row[header] = values[index]?.replace(/"/g, '').trim() || ''; });
-              return row;
+            const headers = lines[headerIndex].split(regex).map(h => h.replace(/"/g, '').trim());
+            const dataRows = lines.slice(headerIndex + 1);
+
+            return dataRows.map(line => {
+                const values = line.split(regex);
+                const row = {};
+                headers.forEach((header, index) => {
+                    row[header] = values[index]?.replace(/"/g, '').trim() || '';
+                });
+                return row;
             });
           };
 
           const analyzeData = (rawData) => {
             let totalSpend = 0, totalImpressions = 0, totalClicks = 0, totalOrders = 0, totalGMV = 0;
             
-            // 增强识别：自动匹配中英文关键词
             const findValue = (row, keys) => {
                 const targetKey = Object.keys(row).find(k => 
-                    keys.some(key => k.toLowerCase().includes(key.toLowerCase()))
+                    keys.some(key => k.toLowerCase() === key.toLowerCase())
                 );
                 if (!targetKey) return 0;
-                const val = row[targetKey].replace(/[^0-9.]/g, ''); // 移除货币符号
+                const val = row[targetKey].replace(/[^0-9.]/g, '');
                 return parseFloat(val) || 0;
             };
 
             rawData.forEach(row => {
-              totalSpend += findValue(row, ['花费', '广告花费', 'cost', 'spend', 'expense']);
-              totalImpressions += findValue(row, ['曝光', '浏览数', 'impression', 'views']);
-              totalClicks += findValue(row, ['点击', '点击次数', 'click']);
-              totalOrders += findValue(row, ['订单', '订单数', 'order', 'conversions']);
-              totalGMV += findValue(row, ['gmv', '销售金额', 'sales', 'revenue']);
+              // 匹配你提供的表格字段名: Expense, Impression, Clicks, Conversions, GMV
+              totalSpend += findValue(row, ['Expense', '花费', '广告花费']);
+              totalImpressions += findValue(row, ['Impression', '曝光', '浏览数']);
+              totalClicks += findValue(row, ['Clicks', '点击', '点击次数']);
+              totalOrders += findValue(row, ['Conversions', '订单', '订单数']);
+              totalGMV += findValue(row, ['GMV', '销售金额']);
             });
 
             return {
@@ -125,15 +133,15 @@
           };
 
           const handleRunAnalysis = async () => {
-            if (!proxyActive) return alert('代理未激活，请点击设置(⚙️)激活代理。');
+            if (!proxyActive) return alert('代理未激活，请点击⚙️激活。');
             const activePlatforms = Object.entries(apiKeys).filter(([p, key]) => key.trim() && apiStatus[p] === 'success');
-            if (activePlatforms.length === 0) return alert('请先配置并保存可用的 API Key。');
+            if (activePlatforms.length === 0) return alert('请先配置并检测有效的 API Key。');
 
             setAiLoading(true);
             setMultiAiResults({});
             for (const [platform, key] of activePlatforms) {
               try {
-                const prompt = `数据分析报告：ROAS为${analysis.metrics.roas}, 点击率为${analysis.metrics.ctr}%, 转化率为${analysis.metrics.cvr}%。请作为资深运营给出3条优化建议，返回JSON格式：{"suggestions": [{"title": "标题", "content": "建议内容"}]}`;
+                const prompt = `Shopee广告数据：ROAS ${analysis.metrics.roas}, CTR ${analysis.metrics.ctr}%, CVR ${analysis.metrics.cvr}%。请给3条建议，返回JSON: {"suggestions": [{"title": "标题", "content": "建议"}]}`;
                 const urlBase = proxy || '';
                 let endpoint = '', body = '', headers = { 'Content-Type': 'application/json' };
 
@@ -154,7 +162,7 @@
                 const json = await res.json();
                 let text = platform === 'gemini' ? json.candidates[0].content.parts[0].text : json.choices[0].message.content;
                 const match = text.match(/\{.*\}/s);
-                setMultiAiResults(prev => ({ ...prev, [platform]: { status: 'success', data: JSON.parse(match[match.length-1]) } }));
+                setMultiAiResults(prev => ({ ...prev, [platform]: { status: 'success', data: JSON.parse(match[0]) } }));
               } catch (e) {
                 setMultiAiResults(prev => ({ ...prev, [platform]: { status: 'error', error: '请求失败' } }));
               }
@@ -165,35 +173,22 @@
           return (
             <div className="max-w-6xl mx-auto px-4 py-10">
               <div className="flex justify-between items-center mb-10">
-                <div>
-                  <h1 className="text-3xl font-extrabold text-gray-900 tracking-tight">Shopee GMV Max <span className="text-orange-600">AI Analyzer</span></h1>
-                  <div className="flex gap-4 mt-2">
-                    {Object.keys(apiKeys).map(p => (
-                        <span key={p} className="text-xs text-gray-400 flex items-center">
-                            <StatusDot status={apiStatus[p]} /> {p}
-                        </span>
-                    ))}
-                  </div>
-                </div>
-                <button onClick={() => setShowSettings(true)} className="p-3 bg-white shadow-sm border rounded-full hover:bg-gray-50 transition-all">⚙️</button>
+                <h1 className="text-3xl font-extrabold">Shopee <span className="text-orange-600">GMV Max</span> Expert</h1>
+                <button onClick={() => setShowSettings(true)} className="p-3 bg-white shadow rounded-full">⚙️</button>
               </div>
 
               {showSettings && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-                  <div className="bg-white rounded-2xl p-8 w-full max-w-md shadow-2xl">
-                    <h2 className="text-xl font-bold mb-6 flex justify-between">配置中心 <button onClick={() => setShowSettings(false)}>✕</button></h2>
-                    <div className={`mb-6 p-4 rounded-xl border ${proxyActive ? 'bg-emerald-50 border-emerald-100' : 'bg-orange-50 border-orange-100'}`}>
-                        <p className="text-xs font-bold text-gray-500 mb-2">代理状态: {proxyActive ? '✅ 已激活' : '❌ 未激活'}</p>
-                        {!proxyActive && <a href="https://cors-anywhere.herokuapp.com/corsdemo" target="_blank" className="block text-center bg-orange-500 text-white text-[11px] font-bold py-2 rounded-lg" onClick={() => setTimeout(()=>setProxyActive(true), 1500)}>点此一键激活代理权限</a>}
+                  <div className="bg-white rounded-2xl p-8 w-full max-w-md">
+                    <h2 className="text-xl font-bold mb-6">配置中心</h2>
+                    <div className="mb-4 p-4 rounded-xl bg-orange-50 border border-orange-100">
+                        <p className="text-xs font-bold mb-2">代理状态: {proxyActive ? '✅ 已激活' : '❌ 未激活'}</p>
+                        {!proxyActive && <a href="https://cors-anywhere.herokuapp.com/corsdemo" target="_blank" className="block text-center bg-orange-500 text-white text-[11px] font-bold py-2 rounded-lg" onClick={() => setTimeout(()=>setProxyActive(true), 1500)}>点此一键激活权限</a>}
                     </div>
                     <div className="space-y-4">
-                        <div>
-                            <label className="block text-[10px] font-bold text-gray-400 uppercase">代理地址 (已默认)</label>
-                            <input type="text" value={proxy} onChange={e => setProxy(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm" />
-                        </div>
                         {Object.keys(apiKeys).map(k => (
                             <div key={k}>
-                                <label className="block text-[10px] font-bold text-gray-400 uppercase">{k} API KEY</label>
+                                <label className="block text-[10px] font-bold text-gray-400">{k.toUpperCase()} KEY</label>
                                 <input type="password" value={apiKeys[k]} onChange={e => setApiKeys({...apiKeys, [k]: e.target.value})} className="w-full border rounded-lg px-3 py-2 text-sm" />
                             </div>
                         ))}
@@ -203,7 +198,7 @@
                         localStorage.setItem('shopee_proxy', proxy);
                         Object.keys(apiKeys).forEach(p => validateKey(p, apiKeys[p], proxy));
                         setShowSettings(false);
-                    }} className="w-full mt-6 bg-black text-white font-bold py-3 rounded-xl">保存并检测配置</button>
+                    }} className="w-full mt-6 bg-black text-white font-bold py-3 rounded-xl">确认保存</button>
                   </div>
                 </div>
               )}
@@ -215,50 +210,49 @@
                     if (!file) return;
                     const reader = new FileReader();
                     reader.onload = (evt) => {
-                        const parsed = parseCSV(evt.target.result);
-                        setData(parsed);
-                        setAnalysis(analyzeData(parsed));
+                        const parsed = parseShopeeCSV(evt.target.result);
+                        if(parsed) { setData(parsed); setAnalysis(analyzeData(parsed)); }
                     };
                     reader.readAsText(file);
                   }} id="csv-upload" className="hidden" />
                   <label htmlFor="csv-upload" className="cursor-pointer block">
-                    <div className="text-6xl mb-4">📂</div>
-                    <p className="text-lg font-medium text-gray-700">上传 Shopee CSV 报表 (支持中英文)</p>
-                    <p className="text-sm text-gray-400 mt-2">支持识别：Cost, Spend, Clicks, Orders, Sales, GMV...</p>
+                    <div className="text-6xl mb-4">📈</div>
+                    <p className="text-lg font-medium">点击上传您刚才发我的那个 Shopee 报表</p>
+                    <p className="text-xs text-gray-400 mt-2">支持解析 Expense, GMV, ROAS 等英文字段</p>
                   </label>
                 </div>
               ) : (
                 <div className="space-y-8 animate-in fade-in">
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    {[{ label: '总GMV', val: analysis.metrics.totalGMV }, { label: 'ROAS', val: analysis.metrics.roas }, { label: '点击率', val: analysis.metrics.ctr + '%' }, { label: '转化率', val: analysis.metrics.cvr + '%' }].map((s, i) => (
+                    {[{ label: 'Total Expense', val: analysis.metrics.totalSpend }, { label: 'ROAS', val: analysis.metrics.roas }, { label: 'CTR', val: analysis.metrics.ctr + '%' }, { label: 'Total GMV', val: analysis.metrics.totalGMV }].map((s, i) => (
                       <div key={i} className="glass-card p-6 rounded-2xl text-center">
                         <p className="text-[10px] font-bold text-gray-400 uppercase">{s.label}</p>
-                        <p className="text-2xl font-black mt-1 text-gray-800">{s.val}</p>
+                        <p className="text-2xl font-black mt-1">{s.val}</p>
                       </div>
                     ))}
                   </div>
                   <div className="flex justify-center">
-                    <button onClick={handleRunAnalysis} disabled={aiLoading} className="bg-orange-600 text-white px-10 py-4 rounded-full font-bold shadow-xl hover:scale-105 transition-all">
-                      {aiLoading ? '正在生成分析报告...' : '🚀 启动多 AI 深度诊断'}
+                    <button onClick={handleRunAnalysis} disabled={aiLoading} className="bg-orange-600 text-white px-10 py-4 rounded-full font-bold shadow-xl">
+                      {aiLoading ? 'AI 分析中...' : '🚀 启动多 AI 诊断'}
                     </button>
                   </div>
                   <div className="grid md:grid-cols-3 gap-6">
                     {Object.entries(multiAiResults).map(([platform, res]) => (
                       <div key={platform} className="glass-card rounded-2xl overflow-hidden shadow-sm flex flex-col">
-                        <div className="bg-gray-800 px-4 py-2 text-white text-[10px] font-bold text-center uppercase">{platform} 建议</div>
+                        <div className="bg-gray-800 px-4 py-2 text-white text-[10px] font-bold text-center uppercase">{platform}</div>
                         <div className="p-5 flex-1 bg-white/50 text-xs">
                           {res.status === 'success' ? (
                             <div className="space-y-4">
                               {res.data.suggestions.map((s, idx) => (
-                                <div key={idx}><h4 className="font-bold text-gray-800">· {s.title}</h4><p className="text-gray-500 mt-1 leading-relaxed">{s.content}</p></div>
+                                <div key={idx}><h4 className="font-bold">· {s.title}</h4><p className="text-gray-500 mt-1">{s.content}</p></div>
                               ))}
                             </div>
-                          ) : <div className="text-red-500">分析失败，请检查网络或 Key。</div>}
+                          ) : <div className="text-red-500 italic">分析失败，请检查配置。</div>}
                         </div>
                       </div>
                     ))}
                   </div>
-                  <div className="text-center pb-10"><button onClick={() => { setData(null); setMultiAiResults({}); }} className="text-gray-400 text-sm underline">重置并重新上传</button></div>
+                  <div className="text-center pb-10"><button onClick={() => { setData(null); setMultiAiResults({}); }} className="text-gray-400 text-sm underline">重新上传新文件</button></div>
                 </div>
               )}
             </div>
