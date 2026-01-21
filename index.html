@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shopee GMV Max 智能分析大师</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body { font-family: 'Inter', -apple-system, sans-serif; background-color: #fcfcfc; }
+        .glass-card { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(10px); border: 1px solid rgba(229, 231, 235, 0.5); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        
+        const ShopeeAdAnalyzer = () => {
+          const [data, setData] = useState(null);
+          const [analysis, setAnalysis] = useState(null);
+          const [loading, setLoading] = useState(false);
+          const [aiLoading, setAiLoading] = useState(false);
+          const [proxy, setProxy] = useState(''); // 代理服务器地址
+          const [apiKeys, setApiKeys] = useState({ openai: '', claude: '', deepseek: '', gemini: '', xai: '' });
+          const [showSettings, setShowSettings] = useState(false);
+          const [multiAiResults, setMultiAiResults] = useState({});
+          const [finalSummary, setFinalSummary] = useState(null);
+
+          useEffect(() => {
+            const savedKeys = localStorage.getItem('shopee_api_keys');
+            const savedProxy = localStorage.getItem('shopee_proxy');
+            if (savedKeys) setApiKeys(JSON.parse(savedKeys));
+            if (savedProxy) setProxy(savedProxy);
+          }, []);
+
+          const saveSettings = () => {
+            localStorage.setItem('shopee_api_keys', JSON.stringify(apiKeys));
+            localStorage.setItem('shopee_proxy', proxy);
+            setShowSettings(false);
+          };
+
+          // 增强型 CSV 解析：处理双引号包裹的逗号
+          const parseCSV = (text) => {
+            const lines = text.split(/\r?\n/).filter(line => line.trim());
+            const regex = /,(?=(?:(?:[^"]*"){2})*[^"]*$)/; // 匹配不在引号内的逗号
+            
+            const headers = lines[0].split(regex).map(h => h.replace(/"/g, '').trim());
+            return lines.slice(1).map(line => {
+              const values = line.split(regex);
+              const row = {};
+              headers.forEach((header, index) => {
+                row[header] = values[index]?.replace(/"/g, '').trim() || '';
+              });
+              return row;
+            });
+          };
+
+          const analyzeData = (rawData) => {
+            let totalSpend = 0, totalImpressions = 0, totalClicks = 0, totalOrders = 0, totalGMV = 0;
+
+            rawData.forEach(row => {
+              totalSpend += parseFloat(row['花费'] || row['广告花费'] || 0);
+              totalImpressions += parseInt(row['曝光'] || row['浏览数'] || 0);
+              totalClicks += parseInt(row['点击'] || row['点击次数'] || 0);
+              totalOrders += parseInt(row['订单'] || row['订单数'] || 0);
+              totalGMV += parseFloat(row['GMV'] || row['销售金额'] || 0);
+            });
+
+            return {
+              metrics: {
+                totalSpend, totalImpressions, totalClicks, totalOrders, totalGMV,
+                ctr: totalImpressions > 0 ? (totalClicks / totalImpressions * 100).toFixed(2) : 0,
+                roas: totalSpend > 0 ? (totalGMV / totalSpend).toFixed(2) : 0,
+                cvr: totalClicks > 0 ? (totalOrders / totalClicks * 100).toFixed(2) : 0
+              },
+              rawData: rawData.slice(0, 10) // 仅传样本当作 AI 上下文
+            };
+          };
+
+          const callAI = async (platform, apiKey, analysisData) => {
+            const prompt = `作为Shopee专家，分析此GMV Max数据：ROAS ${analysisData.metrics.roas}, 点击率 ${analysisData.metrics.ctr}%, 转化率 ${analysisData.metrics.cvr}%。给出3个针对性建议。必须只返回JSON格式: {"suggestions": [{"title": "标题", "content": "建议", "priority": "high"}]}`;
+            
+            const urlBase = proxy || ''; 
+            let endpoint = '';
+            let headers = { 'Content-Type': 'application/json' };
+            let body = {};
+
+            switch(platform) {
+              case 'openai':
+                endpoint = 'https://api.openai.com/v1/chat/completions';
+                headers['Authorization'] = `Bearer ${apiKey}`;
+                body = { model: 'gpt-4o', messages: [{ role: 'user', content: prompt }] };
+                break;
+              case 'deepseek':
+                endpoint = 'https://api.deepseek.com/v1/chat/completions';
+                headers['Authorization'] = `Bearer ${apiKey}`;
+                body = { model: 'deepseek-chat', messages: [{ role: 'user', content: prompt }] };
+                break;
+              case 'gemini':
+                endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`;
+                body = { contents: [{ parts: [{ text: prompt }] }] };
+                break;
+              default: return;
+            }
+
+            const response = await fetch(urlBase + endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
+            if (!response.ok) throw new Error(`Status: ${response.status}`);
+            const resData = await response.json();
+            
+            // 提取内容
+            let text = "";
+            if(platform === 'gemini') text = resData.candidates[0].content.parts[0].text;
+            else text = resData.choices[0].message.content;
+
+            const jsonMatch = text.match(/\{[\s\S]*\}/);
+            return JSON.parse(jsonMatch[0]);
+          };
+
+          const handleRunAnalysis = async () => {
+            const activePlatforms = Object.entries(apiKeys).filter(([_, key]) => key.trim());
+            if (activePlatforms.length === 0) return alert('请先配置 API Key');
+
+            setAiLoading(true);
+            setMultiAiResults({});
+            
+            for (const [platform] of activePlatforms) {
+              try {
+                const result = await callAI(platform, apiKeys[platform], analysis);
+                setMultiAiResults(prev => ({ ...prev, [platform]: { status: 'success', data: result } }));
+              } catch (e) {
+                setMultiAiResults(prev => ({ ...prev, [platform]: { status: 'error', error: e.message } }));
+              }
+            }
+            setAiLoading(false);
+          };
+
+          const handleFileUpload = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+              const rows = parseCSV(evt.target.result);
+              setData(rows);
+              setAnalysis(analyzeData(rows));
+            };
+            reader.readAsText(file);
+          };
+
+          const platformMeta = {
+            openai: { name: 'ChatGPT', color: 'bg-emerald-500' },
+            deepseek: { name: 'DeepSeek', color: 'bg-blue-600' },
+            gemini: { name: 'Gemini', color: 'bg-orange-500' },
+            claude: { name: 'Claude', color: 'bg-purple-500' }
+          };
+
+          return (
+            <div className="max-w-6xl mx-auto px-4 py-10">
+              {/* Header */}
+              <div className="flex justify-between items-center mb-10">
+                <div>
+                  <h1 className="text-3xl font-extrabold text-gray-900 tracking-tight">Shopee GMV Max <span className="text-orange-600">AI Analyzer</span></h1>
+                  <p className="text-gray-500 mt-1">上传报表，获取多维度 AI 增长建议</p>
+                </div>
+                <button onClick={() => setShowSettings(true)} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
+                  <span className="text-2xl">⚙️</span>
+                </button>
+              </div>
+
+              {/* Settings Modal */}
+              {showSettings && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+                  <div className="bg-white rounded-2xl p-8 w-full max-w-md shadow-2xl">
+                    <h2 className="text-xl font-bold mb-6">配置中心</h2>
+                    <div className="space-y-4">
+                      <div>
+                        <label className="block text-xs font-bold text-gray-400 uppercase mb-1">代理地址 (可选)</label>
+                        <input type="text" placeholder="https://your-proxy.com/" value={proxy} onChange={e => setProxy(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-orange-500 outline-none" />
+                      </div>
+                      {Object.keys(apiKeys).map(k => (
+                        <div key={k}>
+                          <label className="block text-xs font-bold text-gray-400 uppercase mb-1">{k} API KEY</label>
+                          <input type="password" value={apiKeys[k]} onChange={e => setApiKeys({...apiKeys, [k]: e.target.value})} className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-orange-500 outline-none" />
+                        </div>
+                      ))}
+                    </div>
+                    <button onClick={saveSettings} className="w-full mt-6 bg-orange-600 text-white font-bold py-3 rounded-xl hover:bg-orange-700 transition-all">保存配置</button>
+                  </div>
+                </div>
+              )}
+
+              {/* Upload Area */}
+              {!analysis ? (
+                <div className="border-2 border-dashed border-gray-200 rounded-3xl p-20 text-center glass-card">
+                  <input type="file" accept=".csv" onChange={handleFileUpload} id="csv-upload" className="hidden" />
+                  <label htmlFor="csv-upload" className="cursor-pointer group">
+                    <div className="text-6xl mb-4 group-hover:scale-110 transition-transform">📊</div>
+                    <p className="text-lg font-medium text-gray-700">点击或拖拽 Shopee 广告报表 (CSV)</p>
+                    <p className="text-sm text-gray-400 mt-2">支持处理 GMV Max 原始导出文件</p>
+                  </label>
+                </div>
+              ) : (
+                <div className="space-y-8 animate-in fade-in duration-500">
+                  {/* Stats Cards */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    {[
+                      { label: '总GMV', val: `¥${analysis.metrics.totalGMV.toLocaleString()}`, color: 'text-orange-600' },
+                      { label: 'ROAS', val: analysis.metrics.roas, color: 'text-blue-600' },
+                      { label: '点击率', val: analysis.metrics.ctr + '%', color: 'text-emerald-600' },
+                      { label: '转化率', val: analysis.metrics.cvr + '%', color: 'text-purple-600' }
+                    ].map((s, i) => (
+                      <div key={i} className="glass-card p-6 rounded-2xl shadow-sm">
+                        <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">{s.label}</p>
+                        <p className={`text-2xl font-black mt-1 ${s.color}`}>{s.val}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Action Button */}
+                  <div className="flex justify-center">
+                    <button 
+                      onClick={handleRunAnalysis} 
+                      disabled={aiLoading}
+                      className="bg-black text-white px-10 py-4 rounded-full font-bold shadow-xl hover:scale-105 active:scale-95 transition-all disabled:opacity-50"
+                    >
+                      {aiLoading ? '正在调遣 AI 军团...' : '🚀 启动多 AI 深度诊断'}
+                    </button>
+                  </div>
+
+                  {/* AI Results Grid */}
+                  <div className="grid md:grid-cols-2 gap-6">
+                    {Object.entries(multiAiResults).map(([platform, res]) => (
+                      <div key={platform} className="glass-card rounded-2xl overflow-hidden shadow-sm flex flex-col">
+                        <div className={`${platformMeta[platform].color} px-4 py-2 text-white text-xs font-bold flex justify-between`}>
+                          <span>{platformMeta[platform].name} ANALYSIS</span>
+                          <span>{res.status === 'success' ? '✅ 成功' : '❌ 失败'}</span>
+                        </div>
+                        <div className="p-6 flex-1">
+                          {res.status === 'success' ? (
+                            <div className="space-y-4">
+                              {res.data.suggestions.map((s, idx) => (
+                                <div key={idx} className="border-l-2 border-gray-100 pl-4">
+                                  <h4 className="font-bold text-gray-800 text-sm">{s.title}</h4>
+                                  <p className="text-xs text-gray-500 mt-1 leading-relaxed">{s.content}</p>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="text-red-500 text-sm">错误: {res.error}</div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  
+                  <div className="text-center mt-10">
+                    <button onClick={() => setAnalysis(null)} className="text-gray-400 text-sm underline hover:text-orange-600">重置并重新上传</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        };
+
+        ReactDOM.render(<ShopeeAdAnalyzer />, document.getElementById('root'));
+    </script>
+</body>
+</html>
