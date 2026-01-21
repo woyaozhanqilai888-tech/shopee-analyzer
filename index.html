@@ -27,13 +27,11 @@
     <script type="text/babel">
         const { useState, useEffect, useMemo } = React;
         const DEFAULT_PROXY = 'https://cors-anywhere.herokuapp.com/';
-
         const PLATFORM_CONFIG = {
             openai: { name: 'ChatGPT', color: 'bg-emerald-500', border: 'border-emerald-200', text: 'text-emerald-700', model: 'gpt-4o' },
             deepseek: { name: 'DeepSeek', color: 'bg-blue-600', border: 'border-blue-200', text: 'text-blue-700', model: 'deepseek-chat' },
-            gemini: { name: 'Gemini', color: 'bg-orange-500', border: 'border-orange-200', text: 'text-orange-700', model: 'gemini-1.5-flash' }
+            gemini: { name: 'Gemini', color: 'bg-orange-500', border: 'border-orange-200', text: 'text-orange-700', model: 'gemini-2.5-flash' }
         };
-
         const App = () => {
             const [data, setData] = useState(null);
             const [loading, setLoading] = useState(false);
@@ -43,7 +41,6 @@
             const [showSettings, setShowSettings] = useState(false);
             const [proxyUrl, setProxyUrl] = useState(DEFAULT_PROXY);
             const [isProxyActive, setIsProxyActive] = useState(false);
-
             // 初始化加载
             useEffect(() => {
                 const saved = localStorage.getItem('shopee_pro_config');
@@ -58,14 +55,12 @@
                     });
                 }
             }, []);
-
             const checkProxyStatus = async (p) => {
                 try {
                     const res = await fetch(p + 'https://google.com', { method: 'HEAD' });
                     setIsProxyActive(res.ok);
                 } catch (e) { setIsProxyActive(false); }
             };
-
             const validateSingleKey = async (platform, key, currentProxy) => {
                 setApiStatus(prev => ({ ...prev, [platform]: 'loading' }));
                 const pBase = currentProxy.endsWith('/') ? currentProxy : currentProxy + '/';
@@ -74,15 +69,20 @@
                     let headers = { 'Content-Type': 'application/json' };
                     if (platform === 'openai') url = 'https://api.openai.com/v1/models';
                     else if (platform === 'deepseek') url = 'https://api.deepseek.com/models';
-                    else url = `https://generativelanguage.googleapis.com/v1beta/models?key=${key}`;
-
+                    else url = `https://generativelanguage.googleapis.com/v1/models?key=${key}`;
                     if (platform !== 'gemini') headers['Authorization'] = `Bearer ${key}`;
-                    
+                   
                     const res = await fetch(pBase + url, { method: 'GET', headers });
-                    setApiStatus(prev => ({ ...prev, [platform]: res.ok ? 'success' : 'error' }));
-                } catch (e) { setApiStatus(prev => ({ ...prev, [platform]: 'error' })); }
+                    if (!res.ok) {
+                        const errorText = await res.text();
+                        throw new Error(`Validation failed: ${res.status} - ${errorText}`);
+                    }
+                    setApiStatus(prev => ({ ...prev, [platform]: 'success' }));
+                } catch (e) { 
+                    setApiStatus(prev => ({ ...prev, [platform]: 'error' })); 
+                    console.error(`${platform} validation error:`, e.message);
+                }
             };
-
             const handleFileUpload = (e) => {
                 const file = e.target.files[0];
                 const reader = new FileReader();
@@ -91,10 +91,8 @@
                     const lines = text.split(/\r?\n/).filter(l => l.trim());
                     const hIdx = lines.findIndex(l => l.includes('Impression') && l.includes('Expense'));
                     if (hIdx === -1) return alert("错误：CSV文件缺少必要的广告数据列。");
-
                     const headers = lines[hIdx].split(',').map(h => h.trim());
                     let totals = { spend: 0, gmv: 0, clicks: 0, imps: 0, orders: 0 };
-
                     lines.slice(hIdx + 1).forEach(line => {
                         const v = line.split(',');
                         const parse = (name) => {
@@ -111,62 +109,82 @@
                 };
                 reader.readAsText(file);
             };
-
             const callAIApi = async (platform, key, prompt) => {
                 const pBase = proxyUrl.endsWith('/') ? proxyUrl : proxyUrl + '/';
                 let url = '', body = {}, headers = { 'Content-Type': 'application/json' };
-
                 if (platform === 'openai' || platform === 'deepseek') {
                     url = platform === 'openai' ? 'https://api.openai.com/v1/chat/completions' : 'https://api.deepseek.com/v1/chat/completions';
                     headers['Authorization'] = `Bearer ${key}`;
-                    body = { 
-                        model: PLATFORM_CONFIG[platform].model, 
+                    body = {
+                        model: PLATFORM_CONFIG[platform].model,
                         messages: [{ role: 'system', content: '你是一个资深电商广告专家，请只返回JSON格式。' }, { role: 'user', content: prompt }],
                         response_format: { type: "json_object" }
                     };
                 } else {
-                    url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`;
-                    body = { contents: [{ parts: [{ text: prompt + " (必须返回JSON格式)" }] }] };
+                    url = `https://generativelanguage.googleapis.com/v1/models/${PLATFORM_CONFIG[platform].model}:generateContent?key=${key}`;
+                    body = { 
+                        contents: [{ parts: [{ text: prompt }] }],
+                        generationConfig: { 
+                            response_mime_type: "application/json",
+                            response_schema: {
+                                type: "object",
+                                properties: {
+                                    suggestions: {
+                                        type: "array",
+                                        items: {
+                                            type: "object",
+                                            properties: {
+                                                title: { type: "string" },
+                                                content: { type: "string" }
+                                            },
+                                            required: ["title", "content"]
+                                        }
+                                    }
+                                },
+                                required: ["suggestions"]
+                            }
+                        }
+                    };
                 }
-
                 const response = await fetch(pBase + url, { method: 'POST', headers, body: JSON.stringify(body) });
-                if (!response.ok) throw new Error(`HTTP_${response.status}`);
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`API call failed: ${response.status} - ${errorText}`);
+                }
                 const json = await response.json();
-                
+               
                 let rawText = '';
                 if (platform === 'gemini') rawText = json.candidates[0].content.parts[0].text;
                 else rawText = json.choices[0].message.content;
-
-                const match = rawText.match(/\{[\s\S]*\}/);
-                return JSON.parse(match[0]);
+                try {
+                    const match = rawText.match(/\{[\s\S]*\}/);
+                    return match ? JSON.parse(match[0]) : JSON.parse(rawText);
+                } catch (parseError) {
+                    throw new Error(`JSON parse error: ${parseError.message}`);
+                }
             };
-
             const runFullAnalysis = async () => {
                 const activePlatforms = Object.entries(apiKeys).filter(([p, k]) => k && apiStatus[p] === 'success');
                 if (activePlatforms.length === 0) return alert("无可用API：请先在设置中配置并确保灯号变绿。");
-
                 setLoading(true);
                 setResults({});
-
                 const roas = (data.gmv / data.spend).toFixed(2);
                 const ctr = (data.clicks / data.imps * 100).toFixed(2);
                 const cvr = (data.orders / data.clicks * 100).toFixed(2);
-                
+               
                 const prompt = `数据报告：广告花费${data.spend.toFixed(2)}, GMV ${data.gmv.toFixed(2)}, ROAS ${roas}, CTR ${ctr}%, 转化率${cvr}%。请给出3条具体的优化建议，按此JSON格式返回：{"suggestions":[{"title":"..","content":".."}]}`;
-
                 const tasks = activePlatforms.map(async ([platform, key]) => {
                     try {
                         const res = await callAIApi(platform, key, prompt);
                         setResults(prev => ({ ...prev, [platform]: { status: 'success', data: res } }));
                     } catch (e) {
                         setResults(prev => ({ ...prev, [platform]: { status: 'error', msg: e.message } }));
+                        console.error(`${platform} analysis error:`, e.message);
                     }
                 });
-
                 await Promise.all(tasks);
                 setLoading(false);
             };
-
             return (
                 <div className="max-w-6xl mx-auto px-4 py-12">
                     {/* Header */}
@@ -183,7 +201,6 @@
                         </div>
                         <button onClick={() => setShowSettings(true)} className="p-4 bg-white shadow-sm border border-slate-200 rounded-2xl hover:bg-slate-50 transition-all text-2xl">⚙️</button>
                     </div>
-
                     {/* Settings Modal */}
                     {showSettings && (
                         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-6">
@@ -192,12 +209,11 @@
                                     <h2 className="text-2xl font-bold text-slate-800">API 集中配置</h2>
                                     <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-slate-600 text-2xl">✕</button>
                                 </div>
-                                
+                               
                                 <div className={`mb-8 p-5 rounded-2xl flex justify-between items-center border ${isProxyActive ? 'bg-emerald-50 border-emerald-100' : 'bg-orange-50 border-orange-100'}`}>
                                     <span className="text-xs font-bold text-slate-600">CORS 代理: {isProxyActive ? '✅ 已就绪' : '⚠️ 需激活'}</span>
                                     {!isProxyActive && <a href="https://cors-anywhere.herokuapp.com/corsdemo" target="_blank" className="bg-orange-600 text-white text-[10px] px-3 py-2 rounded-xl font-black shadow-md hover:bg-orange-700">点击激活</a>}
                                 </div>
-
                                 <div className="space-y-5">
                                     {Object.keys(apiKeys).map(p => (
                                         <div key={p}>
@@ -209,7 +225,6 @@
                                         </div>
                                     ))}
                                 </div>
-
                                 <button onClick={() => {
                                     localStorage.setItem('shopee_pro_config', JSON.stringify({ keys: apiKeys, proxy: proxyUrl }));
                                     Object.entries(apiKeys).forEach(([p, k]) => { if(k) validateSingleKey(p, k, proxyUrl); });
@@ -218,7 +233,6 @@
                             </div>
                         </div>
                     )}
-
                     {/* Main Content */}
                     {!data ? (
                         <div className="border-4 border-dashed border-slate-200 rounded-[3rem] p-24 text-center glass-card group hover:border-orange-300 transition-all cursor-pointer relative overflow-hidden">
@@ -244,14 +258,12 @@
                                     </div>
                                 ))}
                             </div>
-
                             {/* Action Button */}
                             <div className="flex justify-center pt-4">
                                 <button onClick={runFullAnalysis} disabled={loading} className="bg-slate-900 text-white px-16 py-6 rounded-[2rem] font-black text-lg shadow-2xl hover:scale-105 active:scale-95 disabled:bg-slate-200 transition-all flex items-center gap-3">
                                     {loading ? <span className="flex gap-1"><span className="dot-loading status-dot" /><span className="dot-loading status-dot" /><span className="dot-loading status-dot" /></span> : '🚀 启动多 AI 联诊分析'}
                                 </button>
                             </div>
-
                             {/* AI Results */}
                             <div className="grid lg:grid-cols-3 gap-8 pb-20">
                                 {Object.keys(PLATFORM_CONFIG).map(p => results[p] && (
@@ -291,7 +303,6 @@
                 </div>
             );
         };
-
         ReactDOM.render(<App />, document.getElementById('root'));
     </script>
 </body>
