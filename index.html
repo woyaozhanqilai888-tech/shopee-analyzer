@@ -25,7 +25,7 @@
     <script type="text/babel">
         const { useState, useEffect } = React;
         
-        // 1. 自动定义默认代理
+        // 默认代理地址
         const DEFAULT_PROXY = 'https://cors-anywhere.herokuapp.com/';
 
         const ShopeeAdAnalyzer = () => {
@@ -37,36 +37,21 @@
           const [apiStatus, setApiStatus] = useState({ openai: 'idle', deepseek: 'idle', gemini: 'idle' });
           const [showSettings, setShowSettings] = useState(false);
           const [multiAiResults, setMultiAiResults] = useState({});
-          const [proxyActive, setProxyActive] = useState(false); // 代理激活状态
+          const [proxyActive, setProxyActive] = useState(false);
 
-          // 2. 自动激活代理的逻辑
           const checkAndActivateProxy = async (currentProxy) => {
-            if (!currentProxy.includes('cors-anywhere')) {
-                setProxyActive(true);
-                return;
-            }
+            if (!currentProxy.includes('cors-anywhere')) { setProxyActive(true); return; }
             try {
-                // 尝试静默访问代理接口
                 const res = await fetch(currentProxy + 'https://google.com', { method: 'HEAD' });
-                if (res.ok) {
-                    setProxyActive(true);
-                } else {
-                    setProxyActive(false);
-                }
-            } catch (e) {
-                setProxyActive(false);
-            }
+                setProxyActive(res.ok);
+            } catch (e) { setProxyActive(false); }
           };
 
           useEffect(() => {
             const savedKeys = localStorage.getItem('shopee_api_keys');
             const savedProxy = localStorage.getItem('shopee_proxy');
-            
-            // 自动填写
             const currentProxy = savedProxy || DEFAULT_PROXY;
             setProxy(currentProxy);
-            
-            // 自动检测激活状态
             checkAndActivateProxy(currentProxy);
 
             if (savedKeys) {
@@ -79,42 +64,17 @@
           }, []);
 
           const validateKey = async (platform, key, currentProxy) => {
-            if (!key) {
-                setApiStatus(prev => ({ ...prev, [platform]: 'idle' }));
-                return;
-            }
+            if (!key) return;
             setApiStatus(prev => ({ ...prev, [platform]: 'loading' }));
-            
             try {
                 const urlBase = currentProxy || '';
-                let endpoint = '';
-                let headers = { 'Content-Type': 'application/json' };
-
-                if (platform === 'openai') {
-                    endpoint = 'https://api.openai.com/v1/models';
-                    headers['Authorization'] = `Bearer ${key}`;
-                } else if (platform === 'deepseek') {
-                    endpoint = 'https://api.deepseek.com/models';
-                    headers['Authorization'] = `Bearer ${key}`;
-                } else if (platform === 'gemini') {
-                    endpoint = `https://generativelanguage.googleapis.com/v1beta/models?key=${key}`;
-                }
-
+                let endpoint = platform === 'openai' ? 'https://api.openai.com/v1/models' : 
+                               platform === 'deepseek' ? 'https://api.deepseek.com/models' : 
+                               `https://generativelanguage.googleapis.com/v1beta/models?key=${key}`;
+                const headers = platform === 'gemini' ? {} : { 'Authorization': `Bearer ${key}` };
                 const response = await fetch(urlBase + endpoint, { method: 'GET', headers });
                 setApiStatus(prev => ({ ...prev, [platform]: response.ok ? 'success' : 'error' }));
-                // 如果API成功了，说明代理肯定也是通的
-                if(response.ok) setProxyActive(true);
-            } catch (e) {
-                setApiStatus(prev => ({ ...prev, [platform]: 'error' }));
-            }
-          };
-
-          const saveSettings = () => {
-            localStorage.setItem('shopee_api_keys', JSON.stringify(apiKeys));
-            localStorage.setItem('shopee_proxy', proxy);
-            checkAndActivateProxy(proxy);
-            Object.keys(apiKeys).forEach(platform => validateKey(platform, apiKeys[platform], proxy));
-            setShowSettings(false);
+            } catch (e) { setApiStatus(prev => ({ ...prev, [platform]: 'error' })); }
           };
 
           const parseCSV = (text) => {
@@ -131,16 +91,32 @@
 
           const analyzeData = (rawData) => {
             let totalSpend = 0, totalImpressions = 0, totalClicks = 0, totalOrders = 0, totalGMV = 0;
+            
+            // 增强识别：自动匹配中英文关键词
+            const findValue = (row, keys) => {
+                const targetKey = Object.keys(row).find(k => 
+                    keys.some(key => k.toLowerCase().includes(key.toLowerCase()))
+                );
+                if (!targetKey) return 0;
+                const val = row[targetKey].replace(/[^0-9.]/g, ''); // 移除货币符号
+                return parseFloat(val) || 0;
+            };
+
             rawData.forEach(row => {
-              totalSpend += parseFloat(row['花费'] || row['广告花费'] || 0);
-              totalImpressions += parseInt(row['曝光'] || row['浏览数'] || 0);
-              totalClicks += parseInt(row['点击'] || row['点击次数'] || 0);
-              totalOrders += parseInt(row['订单'] || row['订单数'] || 0);
-              totalGMV += parseFloat(row['GMV'] || row['销售金额'] || 0);
+              totalSpend += findValue(row, ['花费', '广告花费', 'cost', 'spend', 'expense']);
+              totalImpressions += findValue(row, ['曝光', '浏览数', 'impression', 'views']);
+              totalClicks += findValue(row, ['点击', '点击次数', 'click']);
+              totalOrders += findValue(row, ['订单', '订单数', 'order', 'conversions']);
+              totalGMV += findValue(row, ['gmv', '销售金额', 'sales', 'revenue']);
             });
+
             return {
               metrics: {
-                totalSpend, totalImpressions, totalClicks, totalOrders, totalGMV,
+                totalSpend: totalSpend.toFixed(2),
+                totalImpressions,
+                totalClicks,
+                totalOrders,
+                totalGMV: totalGMV.toFixed(2),
                 ctr: totalImpressions > 0 ? (totalClicks / totalImpressions * 100).toFixed(2) : 0,
                 roas: totalSpend > 0 ? (totalGMV / totalSpend).toFixed(2) : 0,
                 cvr: totalClicks > 0 ? (totalOrders / totalClicks * 100).toFixed(2) : 0
@@ -148,64 +124,43 @@
             };
           };
 
-          const callAI = async (platform, apiKey, analysisData) => {
-            const prompt = `分析Shopee GMV Max数据：ROAS ${analysisData.metrics.roas}, 点击率 ${analysisData.metrics.ctr}%, 转化率 ${analysisData.metrics.cvr}%。提供3条优化建议，返回JSON: {"suggestions": [{"title": "标题", "content": "建议", "priority": "high"}]}`;
-            const urlBase = proxy || '';
-            let endpoint = '';
-            let headers = { 'Content-Type': 'application/json' };
-            let body = {};
-
-            if (platform === 'openai') {
-                endpoint = 'https://api.openai.com/v1/chat/completions';
-                headers['Authorization'] = `Bearer ${apiKey}`;
-                body = { model: 'gpt-4o', messages: [{ role: 'user', content: prompt }] };
-            } else if (platform === 'deepseek') {
-                endpoint = 'https://api.deepseek.com/v1/chat/completions';
-                headers['Authorization'] = `Bearer ${apiKey}`;
-                body = { model: 'deepseek-chat', messages: [{ role: 'user', content: prompt }] };
-            } else if (platform === 'gemini') {
-                endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-                body = { contents: [{ parts: [{ text: prompt }] }] };
-            }
-
-            const response = await fetch(urlBase + endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
-            const resData = await response.json();
-            const text = platform === 'gemini' ? resData.candidates[0].content.parts[0].text : resData.choices[0].message.content;
-            const jsonMatch = text.match(/\{[\s\S]*\}/);
-            return JSON.parse(jsonMatch[0]);
-          };
-
           const handleRunAnalysis = async () => {
+            if (!proxyActive) return alert('代理未激活，请点击设置(⚙️)激活代理。');
             const activePlatforms = Object.entries(apiKeys).filter(([p, key]) => key.trim() && apiStatus[p] === 'success');
-            
-            // 自动拦截未激活代理的情况
-            if (!proxyActive && proxy.includes('cors-anywhere')) {
-                setShowSettings(true);
-                return alert('检测到代理未激活，请在配置中心点击“激活按钮”');
-            }
-
-            if (activePlatforms.length === 0) return alert('未配置可用API，请点击设置检查。');
+            if (activePlatforms.length === 0) return alert('请先配置并保存可用的 API Key。');
 
             setAiLoading(true);
             setMultiAiResults({});
-            for (const [platform] of activePlatforms) {
+            for (const [platform, key] of activePlatforms) {
               try {
-                const result = await callAI(platform, apiKeys[platform], analysis);
-                setMultiAiResults(prev => ({ ...prev, [platform]: { status: 'success', data: result } }));
+                const prompt = `数据分析报告：ROAS为${analysis.metrics.roas}, 点击率为${analysis.metrics.ctr}%, 转化率为${analysis.metrics.cvr}%。请作为资深运营给出3条优化建议，返回JSON格式：{"suggestions": [{"title": "标题", "content": "建议内容"}]}`;
+                const urlBase = proxy || '';
+                let endpoint = '', body = '', headers = { 'Content-Type': 'application/json' };
+
+                if (platform === 'openai') {
+                    endpoint = 'https://api.openai.com/v1/chat/completions';
+                    headers['Authorization'] = `Bearer ${key}`;
+                    body = JSON.stringify({ model: 'gpt-4o', messages: [{ role: 'user', content: prompt }] });
+                } else if (platform === 'deepseek') {
+                    endpoint = 'https://api.deepseek.com/v1/chat/completions';
+                    headers['Authorization'] = `Bearer ${key}`;
+                    body = JSON.stringify({ model: 'deepseek-chat', messages: [{ role: 'user', content: prompt }] });
+                } else if (platform === 'gemini') {
+                    endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`;
+                    body = JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] });
+                }
+
+                const res = await fetch(urlBase + endpoint, { method: 'POST', headers, body });
+                const json = await res.json();
+                let text = platform === 'gemini' ? json.candidates[0].content.parts[0].text : json.choices[0].message.content;
+                const match = text.match(/\{.*\}/s);
+                setMultiAiResults(prev => ({ ...prev, [platform]: { status: 'success', data: JSON.parse(match[match.length-1]) } }));
               } catch (e) {
-                setMultiAiResults(prev => ({ ...prev, [platform]: { status: 'error', error: e.message } }));
+                setMultiAiResults(prev => ({ ...prev, [platform]: { status: 'error', error: '请求失败' } }));
               }
             }
             setAiLoading(false);
           };
-
-          const platformMeta = {
-            openai: { name: 'ChatGPT', color: 'bg-emerald-500' },
-            deepseek: { name: 'DeepSeek', color: 'bg-blue-600' },
-            gemini: { name: 'Gemini', color: 'bg-orange-500' }
-          };
-
-          const StatusDot = ({ status }) => <span className={`status-dot dot-${status}`} />;
 
           return (
             <div className="max-w-6xl mx-auto px-4 py-10">
@@ -215,57 +170,40 @@
                   <div className="flex gap-4 mt-2">
                     {Object.keys(apiKeys).map(p => (
                         <span key={p} className="text-xs text-gray-400 flex items-center">
-                            <StatusDot status={apiStatus[p]} /> {platformMeta[p].name}
+                            <StatusDot status={apiStatus[p]} /> {p}
                         </span>
                     ))}
                   </div>
                 </div>
-                <button onClick={() => setShowSettings(true)} className="p-2 hover:bg-gray-100 rounded-full transition-colors relative">
-                  <span className="text-2xl">⚙️</span>
-                  {(!proxyActive || Object.values(apiStatus).some(s => s === 'error')) && <span className="absolute top-0 right-0 w-3 h-3 bg-red-500 border-2 border-white rounded-full"></span>}
-                </button>
+                <button onClick={() => setShowSettings(true)} className="p-3 bg-white shadow-sm border rounded-full hover:bg-gray-50 transition-all">⚙️</button>
               </div>
 
               {showSettings && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-                  <div className="bg-white rounded-2xl p-8 w-full max-w-md shadow-2xl animate-in zoom-in duration-200">
-                    <h2 className="text-xl font-bold mb-4 flex justify-between">配置中心 <button onClick={() => setShowSettings(false)}>✕</button></h2>
-                    
-                    {/* 智能代理激活面板 */}
-                    <div className={`mb-6 p-4 rounded-xl border transition-all ${proxyActive ? 'bg-emerald-50 border-emerald-100' : 'bg-orange-50 border-orange-200'}`}>
-                        <div className="flex justify-between items-center mb-2">
-                            <span className="text-xs font-bold uppercase tracking-wider text-gray-500">代理服务器状态</span>
-                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${proxyActive ? 'bg-emerald-200 text-emerald-700' : 'bg-orange-200 text-orange-700'}`}>
-                                {proxyActive ? '已激活' : '待激活'}
-                            </span>
-                        </div>
-                        {!proxyActive && (
-                            <div>
-                                <p className="text-[11px] text-orange-700 mb-3 leading-relaxed">由于浏览器安全策略，请点击下方按钮并在新页面点击 "Request temporary access" 以开启分析功能。</p>
-                                <a href="https://cors-anywhere.herokuapp.com/corsdemo" target="_blank" onClick={() => setTimeout(()=>setProxyActive(true), 2000)} className="block text-center bg-orange-500 text-white text-xs font-bold py-2 rounded-lg shadow-lg hover:bg-orange-600 transition-all">
-                                    一键激活代理权限
-                                </a>
-                            </div>
-                        )}
-                        {proxyActive && <p className="text-[11px] text-emerald-700 italic">代理工作正常，已为您自动填写并连接。</p>}
+                  <div className="bg-white rounded-2xl p-8 w-full max-w-md shadow-2xl">
+                    <h2 className="text-xl font-bold mb-6 flex justify-between">配置中心 <button onClick={() => setShowSettings(false)}>✕</button></h2>
+                    <div className={`mb-6 p-4 rounded-xl border ${proxyActive ? 'bg-emerald-50 border-emerald-100' : 'bg-orange-50 border-orange-100'}`}>
+                        <p className="text-xs font-bold text-gray-500 mb-2">代理状态: {proxyActive ? '✅ 已激活' : '❌ 未激活'}</p>
+                        {!proxyActive && <a href="https://cors-anywhere.herokuapp.com/corsdemo" target="_blank" className="block text-center bg-orange-500 text-white text-[11px] font-bold py-2 rounded-lg" onClick={() => setTimeout(()=>setProxyActive(true), 1500)}>点此一键激活代理权限</a>}
                     </div>
-
                     <div className="space-y-4">
-                      <div>
-                        <label className="block text-xs font-bold text-gray-400 uppercase mb-1">代理地址</label>
-                        <input type="text" value={proxy} onChange={e => setProxy(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-orange-500 outline-none" />
-                      </div>
-                      {Object.keys(apiKeys).map(k => (
-                        <div key={k}>
-                          <div className="flex justify-between items-center mb-1">
-                            <label className="block text-xs font-bold text-gray-400 uppercase">{k} API KEY</label>
-                            <span className="text-[10px] text-gray-500 flex items-center"><StatusDot status={apiStatus[k]} /> {apiStatus[k]}</span>
-                          </div>
-                          <input type="password" value={apiKeys[k]} onChange={e => setApiKeys({...apiKeys, [k]: e.target.value})} className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-orange-500 outline-none" />
+                        <div>
+                            <label className="block text-[10px] font-bold text-gray-400 uppercase">代理地址 (已默认)</label>
+                            <input type="text" value={proxy} onChange={e => setProxy(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm" />
                         </div>
-                      ))}
+                        {Object.keys(apiKeys).map(k => (
+                            <div key={k}>
+                                <label className="block text-[10px] font-bold text-gray-400 uppercase">{k} API KEY</label>
+                                <input type="password" value={apiKeys[k]} onChange={e => setApiKeys({...apiKeys, [k]: e.target.value})} className="w-full border rounded-lg px-3 py-2 text-sm" />
+                            </div>
+                        ))}
                     </div>
-                    <button onClick={saveSettings} className="w-full mt-6 bg-black text-white font-bold py-3 rounded-xl hover:bg-gray-800 transition-all">保存配置并检测</button>
+                    <button onClick={() => {
+                        localStorage.setItem('shopee_api_keys', JSON.stringify(apiKeys));
+                        localStorage.setItem('shopee_proxy', proxy);
+                        Object.keys(apiKeys).forEach(p => validateKey(p, apiKeys[p], proxy));
+                        setShowSettings(false);
+                    }} className="w-full mt-6 bg-black text-white font-bold py-3 rounded-xl">保存并检测配置</button>
                   </div>
                 </div>
               )}
@@ -273,46 +211,49 @@
               {!data ? (
                 <div className="border-2 border-dashed border-gray-200 rounded-3xl p-20 text-center glass-card">
                   <input type="file" accept=".csv" onChange={(e) => {
-                    const file = e.target.文件[0];
+                    const file = e.target.files[0];
                     if (!file) return;
                     const reader = new FileReader();
-                    reader.onload = (evt) => { setData(parseCSV(evt.target.result)); setAnalysis(analyzeData(parseCSV(evt.target.result))); };
+                    reader.onload = (evt) => {
+                        const parsed = parseCSV(evt.target.result);
+                        setData(parsed);
+                        setAnalysis(analyzeData(parsed));
+                    };
                     reader.readAsText(file);
                   }} id="csv-upload" className="hidden" />
-                  <label htmlFor="csv-upload" className="cursor-pointer">
-                    <div className="text-6xl mb-4">📊</div>
-                    <p className="text-lg font-medium text-gray-700">点击上传报表 (CSV)</p>
+                  <label htmlFor="csv-upload" className="cursor-pointer block">
+                    <div className="text-6xl mb-4">📂</div>
+                    <p className="text-lg font-medium text-gray-700">上传 Shopee CSV 报表 (支持中英文)</p>
+                    <p className="text-sm text-gray-400 mt-2">支持识别：Cost, Spend, Clicks, Orders, Sales, GMV...</p>
                   </label>
                 </div>
               ) : (
                 <div className="space-y-8 animate-in fade-in">
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    {[{ label: '总GMV', val: analysis.metrics.totalGMV, c: 'text-orange-600' }, { label: 'ROAS', val: analysis.metrics.roas, c: 'text-blue-600' }, { label: '点击率', val: analysis.metrics.ctr + '%', c: 'text-emerald-600' }, { label: '转化率', val: analysis.metrics.cvr + '%', c: 'text-purple-600' }].map((s, i) => (
-                      <div key={i} className="glass-card p-6 rounded-2xl">
-                        <p className="text-xs font-bold text-gray-400 uppercase">{s.label}</p>
-                        <p className={`text-2xl font-black mt-1 ${s.c}`}>{s.val}</p>
+                    {[{ label: '总GMV', val: analysis.metrics.totalGMV }, { label: 'ROAS', val: analysis.metrics.roas }, { label: '点击率', val: analysis.metrics.ctr + '%' }, { label: '转化率', val: analysis.metrics.cvr + '%' }].map((s, i) => (
+                      <div key={i} className="glass-card p-6 rounded-2xl text-center">
+                        <p className="text-[10px] font-bold text-gray-400 uppercase">{s.label}</p>
+                        <p className="text-2xl font-black mt-1 text-gray-800">{s.val}</p>
                       </div>
                     ))}
                   </div>
-
                   <div className="flex justify-center">
-                    <button onClick={handleRunAnalysis} disabled={aiLoading} className="bg-orange-600 text-white px-10 py-4 rounded-full font-bold shadow-xl hover:scale-105 active:scale-95 transition-all">
-                      {aiLoading ? '正在调遣 AI 军团...' : '🚀 启动多 AI 深度诊断'}
+                    <button onClick={handleRunAnalysis} disabled={aiLoading} className="bg-orange-600 text-white px-10 py-4 rounded-full font-bold shadow-xl hover:scale-105 transition-all">
+                      {aiLoading ? '正在生成分析报告...' : '🚀 启动多 AI 深度诊断'}
                     </button>
                   </div>
-
                   <div className="grid md:grid-cols-3 gap-6">
                     {Object.entries(multiAiResults).map(([platform, res]) => (
                       <div key={platform} className="glass-card rounded-2xl overflow-hidden shadow-sm flex flex-col">
-                        <div className={`${platformMeta[platform].color} px-4 py-2 text-white text-[10px] font-bold`}>{platformMeta[platform].name}</div>
-                        <div className="p-5 flex-1 bg-white/50">
+                        <div className="bg-gray-800 px-4 py-2 text-white text-[10px] font-bold text-center uppercase">{platform} 建议</div>
+                        <div className="p-5 flex-1 bg-white/50 text-xs">
                           {res.status === 'success' ? (
                             <div className="space-y-4">
                               {res.data.suggestions.map((s, idx) => (
-                                <div key={idx}><h4 className="font-bold text-gray-800 text-sm">{s.title}</h4><p className="text-xs text-gray-500 mt-1 leading-relaxed">{s.content}</p></div>
+                                <div key={idx}><h4 className="font-bold text-gray-800">· {s.title}</h4><p className="text-gray-500 mt-1 leading-relaxed">{s.content}</p></div>
                               ))}
                             </div>
-                          ) : <div className="text-red-500 text-xs italic">Error: {res.error}</div>}
+                          ) : <div className="text-red-500">分析失败，请检查网络或 Key。</div>}
                         </div>
                       </div>
                     ))}
